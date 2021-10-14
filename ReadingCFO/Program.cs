@@ -1,45 +1,264 @@
 ﻿using AngleSharp;
-using System;
-using System.Threading.Tasks;
-using System.Linq;
-using AngleSharp.Html.Dom;
 using AngleSharp.Dom;
+using System;
 using System.Collections.Generic;
-using System.Text.RegularExpressions;
-using System.Globalization;
-using System.Threading;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace ReadingCFO
 {
     class Program
     {
-        //Utilizado com o objetivo de gravar no banco as informações. Desta forma se acontece algum erro,
-        //voltar ao processo de onde tinha parado!
-        static string _connection = "";
-        //Url que contém parametro de paginação (num_pagina=1) e de busca(nome=+), onde + corresponde a espaço
-        static string _urlBase = "https://website.cfo.org.br/profissionais-cadastrados/";
+        #region Propriedade Globais
+
         static string _url = "";
+        static string _urlBase = "https://website.cfo.org.br/profissionais-cadastrados/";
+        public static string _filter = "CLEOMAR";
         static int _page = 1;
         static int _pages = 0;
-
-        static List<Dentista> _listaDentistas = new List<Dentista>();
-        static string[,] _arrayNodes;
-
+        static int _registrosProcessados = 0;
+        static int _totalDeRegistros = 0;
         static bool _enabledLogs = true;
+        #endregion
 
-        static async Task StartByWebSiteCFO()
+        public static string _arquivo;
+        static List<Dentista> _listaDentistas = new List<Dentista>();
+
+        static async Task Main(string[] args)
         {
-            Console.WriteLine($"Inciando leitura da página {_page}");
+            Stopwatch stopWatch = new Stopwatch();
+            stopWatch.Start();
+
+            //_arquivo = Directory.GetCurrentDirectory() + "\\dados.txt";
+
+            //Se existir arquivo deletar!
+            //if (System.IO.File.Exists(_arquivo))
+            //    System.IO.File.Delete(_arquivo);
+
+            //System.IO.File.Create(_arquivo).Close();
+            //Console.WriteLine($"                                                                     ");
+
+            await CalcularPaginas();
+
+            //Quebrar em 2 Processos
+            var numberOfProcess = 2;
+
+            var pagesOfProcessOne = _pages / numberOfProcess;
+            var pagesOfProcessTwo = pagesOfProcessOne + 1;
+
+
+            var tarefa = StartByWebSiteCFO(1, pagesOfProcessOne);
+            var tarefa2 = StartByWebSiteCFO(pagesOfProcessTwo, _pages);
+
+            var resTaskOne = await tarefa;
+            var resTaskTwo = await tarefa2;
+
+            stopWatch.Stop();
+
+            showEnd(stopWatch.Elapsed);
+        }
+
+        static async Task<bool> StartByWebSiteCFO(int startInPage, int endPage)
+        {
+            showInit(startInPage);
 
             var context = BrowsingContext.New(
                Configuration.Default.WithDefaultLoader()
                .WithDefaultCookies()
                );
 
-            await updatePageOfUrl();
+            updatePageOfUrl();
 
             var dataPage = await context.OpenAsync(_url);
+
+            var statusCode = dataPage.StatusCode;
+            if (statusCode != System.Net.HttpStatusCode.OK)
+                Console.WriteLine($"Servidor retornou código: {statusCode}");
+
+            var Element = dataPage.GetElementsByClassName("entry-content").FirstOrDefault();
+
+            var nosFiltrados = cleanGarbage(Element);
+
+            var array = fillInArray(nosFiltrados);
+
+            writeInList(array);
+
+            //if (_pages >= _page)
+            if (endPage > startInPage)
+                await StartByWebSiteCFO(++startInPage, endPage);
+
+            return true;
+        }
+
+        static List<INode> cleanGarbage(IElement element)
+        {
+            element.QuerySelector("div").Remove();
+            element.QuerySelector("script").Remove();
+
+            var Atualizacao = element.GetElementsByTagName("h6").FirstOrDefault();
+            var ultimaAtualizacao = Atualizacao.InnerHtml;
+
+            element.QuerySelector("h6").Remove();
+
+            // Eliminar Nós sem Valor e Deixar HR - Usa o <HR> como separador
+            var nos = element.ChildNodes
+                .Where(n =>
+                    (n.NodeName == "#text" && !String.IsNullOrWhiteSpace(n.TextContent))
+                        || n.NodeName == "HR" || n.NodeName == "B")
+                .ToList();
+
+            //Remover primeiro separador
+            nos.RemoveAt(0);
+            nos.RemoveAt(0);
+            //Remover os nós da Paginação
+            nos.RemoveAt(nos.Count - 1);
+            nos.RemoveAt(nos.Count - 1);
+
+            return nos;
+        }
+
+        /// <summary>
+        /// Linhas e Colunas (10 registros por página e 7 colunas de informação)
+        /// </summary>
+        /// <param name="nos"></param>
+        static string[,] fillInArray(List<INode> nos)
+        {
+            int registro = 0;
+
+            var arrayNodes = new string[10, 7];
+
+            foreach (var no in nos)
+            {
+                var (valor, conteudo, nome) = showNode(no);
+
+                if (nome == "HR") //Separador de CFO
+                {
+                    registro += 1;
+                    continue;
+                }
+
+                if (nome == "B") //Nome
+                {
+                    arrayNodes[registro, 1] = conteudo;
+                    continue;
+                }
+
+                if (valor.Contains("- Insc")) //Cargo ou Inscrição
+                {
+                    arrayNodes[registro, 0] = valor;
+                    continue;
+                }
+
+                if (valor.Contains("Sit")) //Situação
+                {
+                    arrayNodes[registro, 2] = valor;
+                    continue;
+                }
+
+                if (valor.Contains("Tip")) //Tipo de Inscrição
+                {
+                    arrayNodes[registro, 3] = valor;
+                    continue;
+                }
+
+                if (valor.Contains("Espec")) //Especialidade
+                {
+                    arrayNodes[registro, 4] = valor;
+                    continue;
+                }
+
+                if (valor.Contains("Data de inscri")) //Data de Inscrição
+                {
+                    arrayNodes[registro, 5] = valor;
+                    continue;
+                }
+
+                if (valor.Contains("Data de regis")) //Data de Registro
+                {
+                    arrayNodes[registro, 6] = valor;
+                    continue;
+                }
+            }
+
+            _page = _page + 1;
+
+            return arrayNodes;
+        }
+
+        static void writeInList(string[,] array)
+        {
+            
+            var linhas = array.GetLength(0);
+            for (int i = 0; i < linhas; i++)
+            {
+                var line = "";
+                var colunas = array.GetLength(1);
+
+                for (int j = 0; j < colunas; j++)
+                {
+                    if (!String.IsNullOrEmpty(array[i, j]))
+                        line = line + array[i, j].Trim() + ";";
+                }
+
+                var res = 1;
+                //Salva na Lista
+                //_listaDentistas.Add();
+
+                //new Dentista(
+                //reg[0].TextContent.Split("-")[0],
+                //reg[0].TextContent.Split("-")[1].Split(":")[1],
+                //reg[1].TextContent,
+                //reg[2].TextContent.Split(":")[1],
+                //reg[3].TextContent.Split(":")[1],
+                //reg[4].TextContent.Split(":")[1].Trim(),
+                //reg[5].TextContent.Split(":")[1].Trim()
+                //)
+            }
+
+            awaitWebServer();
+
+        }
+
+        static void writeInFile(string[,] array)
+        {
+            //StreamWriter sw = new StreamWriter(_arquivo, true);
+
+            //var linhas = array.GetLength(0);
+            //for (int i = 0; i < linhas; i++)
+            //{
+            //    var line = "";
+            //    var colunas = array.GetLength(1);
+
+            //    for (int j = 0; j < colunas; j++)
+            //    {
+            //        if (!String.IsNullOrEmpty(array[i, j]))
+            //            line = line + array[i, j].Trim() + ";";
+            //    }
+
+            //    sw.WriteLine(line);
+            //}
+
+            awaitWebServer();
+
+            //showProgress(linhas);
+
+            //sw.Close();
+        }
+
+        static async Task CalcularPaginas()
+        {
+            var context = BrowsingContext.New(
+               Configuration.Default.WithDefaultLoader()
+               .WithDefaultCookies()
+               );
+
+            var url = _urlBase + $"?num_pagina={_page}&nome={_filter}";
+
+            var dataPage = await context.OpenAsync(url);
 
             var Results = dataPage.GetElementsByClassName("entry-content").FirstOrDefault();
 
@@ -47,202 +266,93 @@ namespace ReadingCFO
             Results.QuerySelector("script").Remove();
 
             var Atualizacao = Results.GetElementsByTagName("h6").FirstOrDefault();
-            var ultimaAtualizacao = Atualizacao.InnerHtml;
+            var ultimaAtualizacaoWS = Atualizacao.InnerHtml;
+
+            Console.WriteLine($"{ultimaAtualizacaoWS}");
 
             Results.QuerySelector("h6").Remove();
 
             // Eliminar Nós sem Valor e Deixar HR - Usa o <HR> como separador
             var nosComValor = Results.ChildNodes
-                .Where(n => 
+                .Where(n =>
                     (n.NodeName == "#text" && !String.IsNullOrWhiteSpace(n.TextContent))
                         || n.NodeName == "HR" || n.NodeName == "B")
                 .ToList();
 
-            var totailPagina = nosComValor[0].TextContent;
-            var _numeroDeRegistros = Int32.Parse(String.Join("", Regex.Split(totailPagina, @"[^\d]")));
-            Console.WriteLine($"Total de Registros encontrados: {_numeroDeRegistros}");
-            var valorDecimal = (decimal)_numeroDeRegistros / 10;
+            var totalPagina = nosComValor[0].TextContent;
+            _totalDeRegistros = Int32.Parse(String.Join("", Regex.Split(totalPagina, @"[^\d]")));
+
+            Console.WriteLine($"Total de Registros encontrados: {_totalDeRegistros}");
+
+            var valorDecimal = (decimal)_totalDeRegistros / 10;
             _pages = (int)Math.Ceiling(valorDecimal);
-            //Remover nó de Total de Páginas
-            nosComValor.RemoveAt(0);
-            //Remover primeiro separador
-            nosComValor.RemoveAt(0);
-            ////Remover os nós da Paginação
-            nosComValor.RemoveAt(nosComValor.Count - 1);
-            nosComValor.RemoveAt(nosComValor.Count - 1);
-            //linhas e colunas (10 registros por página e 7 colunas de informação)
-
-            int registro = 0;
-            _arrayNodes = new string[10, 7];
-            foreach (var no in nosComValor)
-            {
-                var (valor, conteudo, nome) = await ShowNode(no);
-
-
-                if (nome == "HR")
-                {
-                    registro = registro + 1;
-                    continue;
-                }
-
-                //Nome
-                if (nome == "B")
-                {
-                    _arrayNodes[registro, 1] = conteudo;
-                    continue;
-                }
-
-                //Cargo/Inscrição
-                if (valor.Contains("- Insc"))
-                {
-                    _arrayNodes[registro, 0] = valor;
-                    continue;
-                }
-
-                //Situação
-                if (valor.Contains("Sit"))
-                {
-                    _arrayNodes[registro, 2] = valor;
-                    continue;
-                }
-
-                //Tipo de Inscrição
-                if (valor.Contains("Tip"))
-                {
-                    _arrayNodes[registro, 3] = valor;
-                    continue;
-                }
-
-                //Especialidade
-                if (valor.Contains("Espec"))
-                {
-                    _arrayNodes[registro, 4] = valor;
-                    continue;
-                }
-
-                //Data de Inscrição
-                if (valor.Contains("Data de inscri"))
-                {
-                    _arrayNodes[registro, 5] = valor;
-                    continue;
-                }
-
-                //Data de Registro
-                if (valor.Contains("Data de regis"))
-                {
-                    _arrayNodes[registro, 6] = valor;
-                    continue;
-                }
-            }
-
-            _page = _page + 1;
-
-            if (_pages >= _page)
-                await StartByWebSiteCFO();
         }
-        static async Task AddElement(int line, int column, string value)
+
+        #region Funções
+        static void awaitWebServer()
         {
+            if (ehMultiplo(_page))
+            {
+                Console.WriteLine($"Dando um descanso ao Servidor!");
+                Thread.Sleep(400000); //Thread.Sleep(5000) => 5 Segundos / (300000) => 5 minutos
+                Console.WriteLine($"Servidor pronto para continuar!");
+            }
+        }
+        static bool ehMultiplo(int num) => ((num % 250) == 0);
+        static void updatePageOfUrl() => _url = _urlBase + $"?num_pagina={_page}&nome={_filter}";
+        #endregion
 
+        #region Mensagens 
+
+        static void showInit(int page)
+        {
+            Console.WriteLine($"                                                                     ");
+            Console.WriteLine($"INICIANDO LEITURA DA PÁGINA {page}");
+            Console.WriteLine($"                                                                     ");
         }
 
-        static async Task<(string, string, string)> ShowNode(INode node)
+        static void showEnd(TimeSpan ts)
+        {
+            string elapsedTime = String.Format("{0:00} horas {1:00} minutos {2:00} segundos {3:00} milésimos",
+                ts.Hours, ts.Minutes, ts.Seconds,
+                ts.Milliseconds / 10);
+
+            Console.WriteLine($"Finalizada Leitura em {elapsedTime}!");
+        }
+        static void showProgress(int linhas)
+        {
+            if (_page == (_pages + 1))
+                _registrosProcessados = _registrosProcessados + (_totalDeRegistros - _registrosProcessados);
+            else
+                _registrosProcessados = _registrosProcessados + linhas;
+
+            Console.WriteLine($"                                                                     ");
+            Console.WriteLine($"{_registrosProcessados} de {_totalDeRegistros} registro importados!");
+        }
+        static (string, string, string) showNode(INode node)
         {
             if (_enabledLogs)
             {
-                Console.WriteLine($"|====================================================================");
-                Console.WriteLine($"|  Conteudo: {node.TextContent}");
-                Console.WriteLine($"|  Tipo: {node.NodeType}");
-                Console.WriteLine($"|  Valor: {node.NodeValue}");
-                Console.WriteLine($"|  Nome: {node.NodeName}");
-                Console.WriteLine($"|====================================================================");
+                if (node.NodeName != "HR")
+                {
+                    //Console.WriteLine($"                                                                     ");
+                    //Console.WriteLine($"|====================================================================");
+                    Console.WriteLine($"|  Conteudo: {node.TextContent}");
+                    //Console.WriteLine($"|  Tipo: {node.NodeType}");
+                    //Console.WriteLine($"|  Valor: {node.NodeValue}");
+                    //Console.WriteLine($"|  Nome: {node.NodeName}");
+                    //Console.WriteLine($"|====================================================================");
+                }
+                if (node.NodeName == "HR")
+                    Console.WriteLine($"|====================================================================");
             }
 
             return (node.NodeValue, node.TextContent, node.NodeName);
         }
-
-        static async Task updatePageOfUrl() => _url = _urlBase + $"?num_pagina={_page}&nome=CLEOMAR";
-
-        static async Task Main(string[] args)
-        {
-            await StartByWebSiteCFO();
-
-            //var context = BrowsingContext.New(
-            //   Configuration.Default.WithDefaultLoader()
-            //   .WithDefaultCookies()
-            //   );
-
-
-            //var Page = await context.OpenAsync(_url);
-            //var form = Page.Forms["formConsulta"];
-
-            //var fieldEnrollment = form["inscricao"] as IHtmlInputElement;
-
-            //var fieldName = form["nome"] as IHtmlInputElement;
-            //fieldName.Value = " ";
-
-            //var resultado = await form.SubmitAsync();
-            //var Results = resultado.GetElementsByClassName("entry-content").FirstOrDefault();
-            //Results.QuerySelector("div").Remove();
-            //Results.QuerySelector("script").Remove();
-
-            //var Atualizacao = Results.GetElementsByTagName("h6").FirstOrDefault();
-            //var ultimaAtualizacao = Atualizacao.InnerHtml;
-
-            //Results.QuerySelector("h6").Remove();
-
-            ////Eliminar Nós sem Valor e Deixar HR - Usa o <HR> como separador 
-            //var nosComValor = Results.ChildNodes
-            //    .Where(n => !String.IsNullOrWhiteSpace(n.TextContent) && n.NodeName != "HR" && n.NodeName != "A")
-            //    .ToList();
-
-            //var totailPagina = nosComValor[0].TextContent;
-            //var total = Int32.Parse(String.Join("", Regex.Split(totailPagina, @"[^\d]")));
-            //Console.WriteLine($"Total de Registros encontrados: {total}");
-
-            ////var totalDePaginas = total / 10;
-
-            //nosComValor.RemoveAt(0);
-            ////Remover a Paginação
-            //nosComValor.RemoveAt(nosComValor.Count - 1);
-            //nosComValor.RemoveAt(nosComValor.Count - 1);
-
-            //var quebrados = nosComValor.Select((x, i) => new { Index = i, Value = x })
-            //        .GroupBy(x => x.Index / 6)
-            //        .Select(x => x.Select(v => v.Value).ToList())
-            //        .ToList();
-
-            //var lista = new List<Medico>();
-
-            //Parallel.ForEach(quebrados, new ParallelOptions { MaxDegreeOfParallelism = 10 }, reg =>
-            //{
-            //    lista.Add(new Medico(
-            //        reg[0].TextContent.Split("-")[0],
-            //        reg[0].TextContent.Split("-")[1].Split(":")[1],
-            //        reg[1].TextContent,
-            //        reg[2].TextContent.Split(":")[1],
-            //        reg[3].TextContent.Split(":")[1],
-            //        reg[4].TextContent.Split(":")[1].Trim(),
-            //        reg[5].TextContent.Split(":")[1].Trim()
-            //        ));
-            //});
-
-
-            //var altaResolucao = Stopwatch.IsHighResolution;
-            //Stopwatch stopWatch = new Stopwatch();
-
-            //stopWatch.Start();
-            //Thread.Sleep(5000);
-            //stopWatch.Stop();
-            //TimeSpan ts = stopWatch.Elapsed;
-            //string elapsedTime = String.Format("{0:00}:{1:00}:{2:00}.{3:00}",
-            //    ts.Hours, ts.Minutes, ts.Seconds,
-            //    ts.Milliseconds / 10);
-            //Console.WriteLine(elapsedTime, "RunTime");
-
-            Console.WriteLine("Finalizado a Leitura da Página!");
-        }
+        #endregion
     }
 
+    #region Classes
     public class Dentista
     {
         public Dentista(
@@ -283,4 +393,66 @@ namespace ReadingCFO
         public DateTime InscricaoCRO { get; set; }
         public DateTime RegistroCRO { get; set; }
     }
+    #endregion
+
+    #region Exemplo com Form's e Paralelismo
+    //var context = BrowsingContext.New(
+    //   Configuration.Default.WithDefaultLoader()
+    //   .WithDefaultCookies()
+    //   );
+
+    //var Page = await context.OpenAsync(_url);
+    //var form = Page.Forms["formConsulta"];
+
+    //var fieldEnrollment = form["inscricao"] as IHtmlInputElement;
+
+    //var fieldName = form["nome"] as IHtmlInputElement;
+    //fieldName.Value = " ";
+
+    //var resultado = await form.SubmitAsync();
+    //var Results = resultado.GetElementsByClassName("entry-content").FirstOrDefault();
+    //Results.QuerySelector("div").Remove();
+    //Results.QuerySelector("script").Remove();
+
+    //var Atualizacao = Results.GetElementsByTagName("h6").FirstOrDefault();
+    //var ultimaAtualizacao = Atualizacao.InnerHtml;
+
+    //Results.QuerySelector("h6").Remove();
+
+    ////Eliminar Nós sem Valor e Deixar HR - Usa o <HR> como separador 
+    //var nosComValor = Results.ChildNodes
+    //    .Where(n => !String.IsNullOrWhiteSpace(n.TextContent) && n.NodeName != "HR" && n.NodeName != "A")
+    //    .ToList();
+
+    //var totailPagina = nosComValor[0].TextContent;
+    //var total = Int32.Parse(String.Join("", Regex.Split(totailPagina, @"[^\d]")));
+    //Console.WriteLine($"Total de Registros encontrados: {total}");
+
+    ////var totalDePaginas = total / 10;
+
+    //nosComValor.RemoveAt(0);
+    ////Remover a Paginação
+    //nosComValor.RemoveAt(nosComValor.Count - 1);
+    //nosComValor.RemoveAt(nosComValor.Count - 1);
+
+    //var quebrados = nosComValor.Select((x, i) => new { Index = i, Value = x })
+    //        .GroupBy(x => x.Index / 6)
+    //        .Select(x => x.Select(v => v.Value).ToList())
+    //        .ToList();
+
+    //var lista = new List<Medico>();
+
+    //Parallel.ForEach(quebrados, new ParallelOptions { MaxDegreeOfParallelism = 10 }, reg =>
+    //{
+    //    lista.Add(new Medico(
+    //        reg[0].TextContent.Split("-")[0],
+    //        reg[0].TextContent.Split("-")[1].Split(":")[1],
+    //        reg[1].TextContent,
+    //        reg[2].TextContent.Split(":")[1],
+    //        reg[3].TextContent.Split(":")[1],
+    //        reg[4].TextContent.Split(":")[1].Trim(),
+    //        reg[5].TextContent.Split(":")[1].Trim()
+    //        ));
+    //});
+    #endregion
 }
