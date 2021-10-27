@@ -1,13 +1,112 @@
-﻿## collapsible markdown?
+﻿# OBJETIVO/NECESSIDADE
 
-<details><summary>CLICK ME</summary>
-<p>
+O Conselho Federeal de Odontologia não dispõe de uma API para consultas de cadastros CRO. Sendo assim, a consulta deve ser realizada manualmente através do site para cada caso. 
 
-#### yes, even hidden code blocks!
+Pensando nisso, a proposta é baixar estes dados de forma automatizada e gravar em uma base de dados que após pode ser consultada ou atualizado uma base já existente.
 
-```python
-print("hello world!")
+* Site disponível em: https://website.cfo.org.br/profissionais-cadastrados/
+
+# CRAWLER/WEB SCRAPING - O QUE É, ESTRUTURA E FUNCIONAMENTO
+
+Também conhecido como Robô, Robot, Bot ou Crawler. São programas usados pelos mecanismos de busca para explorar a internet de maneira automática e fazer download de conteúdo web de sites. Ainda pode ser considerado o processo de coleta de dados estruturados da web de maneira automatizada, ou seja, a extração de dados da web.
+
+São cerca de 900.000 mil registros encontrados na base.
+Pensando em desempenho e agilidade, a tarefa foi quebrada para ser realizado por 5 (cinco) processo (Threads) distintos, dividindo o montante de dados para cada um. Como exemplo imaginemos que tem 500 registros. Cada processo se encarregara de importar 100 registros.
+
+Como o sistema realiza consultas constantes e ineteruptas é possível que o servidor requisitado entenda que se trata de um ataque cibernético. Pensando nisso foi setado um temporizador, que interrompe as consultas por determinado tempo. Ainda assim pode ser que o servidor venha reestringir o acesso. Se isso ocrrer ele exibirá o erro retornado, fará a interupção e tentará retomar a importação através da Recursividade integrada.
+
+Se mesmo assim houver erro impedindo de continuar a importação. Não se preocupe. Foi inserido um registro de logs, o qual retomará a atividade do ponto em que parou, bastando apenas iniciar o processo novamente.
+
+# CONFIGURAÇÕES 
+
+As configurações encontram-se no arquivo App.config.
+São duas configurações possíveis:
+
+1. Banco de Dados;
+2. Campo de busca. Utilizado para atualizar um registro específico ou um grupo de registros.
+
+Nome | Valor Padrão | Observação
+-------------------|---|---|
+ConnectionString | "Data source=DbServerDEV; Initial Catalog=CrawlerCFO; User  Id=appdotnet; Password=appdotnetdev;Connect Timeout=30" | Conexão da base de desenvolvimento |
+Name | + | Significa espaço em branco, ou seja, traz todos os registros |
+Tempo | 400000 | Representação em milisegundos. Exemplo 300.000 / 60 = 5 minutos |
+Log | false | Habilita ou Desabilita a apresentação de detalhes dos registros importados
+
+# MIGRATION / SCRIPT SQL
+
+```sql
+USE [YourDataBase]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE TABLE [dbo].[Importar](
+	[Id] [bigint] IDENTITY(1,1) NOT NULL,
+	[Data] [datetime2](7) NOT NULL,
+	[TotalDeRegistros] [bigint] NOT NULL,
+	[TotalDePaginas] [bigint] NOT NULL
+) ON [PRIMARY]
+GO
+
+CREATE TABLE [dbo].[CadastroCfoDentista](
+	[Id] [bigint] IDENTITY(1,1) NOT NULL,
+	[Processo] [nvarchar](max) NULL,
+	[Pagina] [bigint] NOT NULL,
+	[Nome] [nvarchar](max) NULL,
+	[Funcao] [nvarchar](max) NULL,
+	[Inscricao] [nvarchar](max) NULL,
+	[Estado] [nvarchar](max) NULL,
+	[Tipo] [nvarchar](max) NULL,
+	[Situacao] [nvarchar](max) NULL,
+	[Especialidades] [nvarchar](max) NULL,
+	[DataInscricao] [datetime2](7) NULL,
+	[DataRegistro] [datetime2](7) NULL,
+	[RegistroImportadoEm] [datetime2](7) NOT NULL,
+ CONSTRAINT [PK_CadastroCfoDentista] PRIMARY KEY CLUSTERED 
+(
+	[Id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+GO
 ```
 
-</p>
-</details>
+
+# SQL PARA CONSULTAS E CONFERÊNCIA DOS DADOS
+
+```sql
+-- Consultas para conferência
+SELECT * FROM IMPORTAR;
+SELECT * FROM CADASTROCFODENTISTA;
+
+SELECT * FROM CADASTROCFODENTISTA WHERE PROCESSO = 4;
+SELECT COUNT(*) FROM CADASTROCFODENTISTA;
+SELECT MAX(PAGINA) MAIORPAG FROM CADASTROCFODENTISTA WHERE PROCESSO = 3;
+SELECT * FROM CADASTROCFODENTISTA WHERE PAGINA = 100;
+
+-- Limpar Tabela e restartar indíce
+TRUNCATE TABLE IMPORTAR;
+TRUNCATE TABLE CADASTROCFODENTISTA;
+
+-- Consulta para retomada da atividade
+SELECT 
+	PROCESSO,
+	MIN(PAGINA) PAGINAINICIAL,
+	MAX(PAGINA) ULTIMAPAGINAPROCESSADA
+FROM 
+	CADASTROCFODENTISTA
+GROUP BY PROCESSO
+
+-- Validar Importação
+SELECT 
+	PROCESSO,
+	PAGINA 
+FROM 
+	CADASTROCFODENTISTA
+GROUP BY 
+	PROCESSO, PAGINA
+HAVING COUNT(PAGINA) <> 10
+```
